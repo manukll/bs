@@ -1,6 +1,7 @@
-import time
 import json
 import os
+import pathlib
+import time
 
 import click
 import requests
@@ -28,15 +29,15 @@ def bs():
     confirm = 'Do you really want to download {0} season(s) with {1} episode(s)'
     click.confirm(confirm.format(len(seasons), sum(len(e) for e in episodes)), abort=True)
 
-    # pathlib here...
-    file = f'{series.split("/")[-2]}.txt'
+    downloads = str(pathlib.Path.home() / 'Downloads')
+    filename = series.split('/')[-2].replace('-', '')
 
     for season in episodes:
         with click.progressbar(season, label='Decoding captchas') as bar:
             for episode in bar:
-                # file.write(decaptcha(episode) + '\n')
-                print(episode)
-                print('\n')
+                with open(f'{downloads}/{filename}.txt', 'a') as f:
+                    f.write(decaptcha(episode))
+                    f.write('\n')
 
 
 def get_series():
@@ -98,7 +99,7 @@ def get_all_series():
 
     series = bsto('https://bs.to/andere-serien', '.genre li a')
 
-    return {s.text: f'https://bs.to/{s.attrs["href"]}/de/' for s in series}
+    return {s.text: f'https://bs.to/{s.attrs["href"]}/de' for s in series}
 
 
 def get_all_seasons(series):
@@ -117,21 +118,25 @@ def get_all_episodes(season):
 
     with click.progressbar(rows, label='Collecting episodes') as bar:
         for _, e in enumerate(bar):
-            hoster = e.find('td')[-1].find('a')
+            hoster = e.find('td')[-1].find('a', first=True)
 
-            hosts = []
+            if hoster:
+                url = f'https://bs.to/{hoster.attrs["href"]}'
+                html = bsto(url, '*')[0]
 
-            for h in hoster:
-                lid = bsto(f'https://bs.to/{h.attrs["href"]}', '.hoster-player')[0]
-                hosts.append(lid.attrs['data-lid'])
+                token = html.find('meta[name="security_token"]', first=True)
+                lid = html.find('.hoster-player', first=True)
 
-            if hosts:
-                episodes.append(hosts)
+                episodes.append({
+                    'token': token.attrs['content'],
+                    'LID': lid.attrs['data-lid'],
+                    'url': url,
+                })
 
     return episodes
 
 
-def decaptcha(urls):
+def decaptcha(episode):
     """Solve captcha"""
 
     def create_task(url):
@@ -150,33 +155,34 @@ def decaptcha(urls):
             "taskId": task.json()['taskId']
         }))
 
-    for url in urls:
-        captcha = create_task(url)
+    # create task and wait average time to solve captcha
+    task = create_task(episode['url'])
+    time.sleep(15)
 
-        # average time to solve captcha
-        time.sleep(15)
+    # try several times
+    for _ in range(120):
+        result = get_task_result(task).json()
 
-        # try up to 90 more secs
-        for attempt in range(90):
-            result = get_task_result(captcha).json()
+        if 'status' in result:
 
-            if 'status' in result:
+            if 'processing' in result['status']:
+                time.sleep(1)
+                continue
 
-                if 'processing' in result['status']:
-                    time.sleep(1)
-                    continue
+            if 'ready' in result['status']:
+                del episode['url']
 
-                if 'ready' in result['status']:
-                    return requests.post('https://bs.to/ajax/embed.php', params={
-                        'token': BS_SECURITY_TOKEN,
-                        'LID': '',
-                        'ticket': result['solution']['gRecaptchaResponse'],
-                    })
+                res = session.post('https://bs.to/ajax/embed.php', data={
+                    **episode,
+                    'ticket': result['solution']['gRecaptchaResponse'],
+                })
 
-            if 'errorCode' in result:
-                click.echo('Error #{errorId}: {#errorCode}'.format(**result))
-                click.echo('{errorDescription}'.format(**result))
-                quit()
+                return res.json()['link']
+
+        if 'errorCode' in result:
+            click.echo('Error #{errorId}: {#errorCode}'.format(**result))
+            click.echo('{errorDescription}'.format(**result))
+            quit()
 
 
 def bsto(url, sel):
